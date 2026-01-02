@@ -186,60 +186,153 @@ export async function GET(request: NextRequest) {
       })
     }
 
-    // Get existing highlights to check for duplicates
+    // Get existing highlights to check for duplicates and updates
     const { data: existingHighlights, error: fetchError } = await supabase
       .from('highlights')
-      .select('text, html_content')
+      .select('id, text, html_content')
 
     if (fetchError) throw fetchError
 
-    const existingTexts = new Set(
-      (existingHighlights || []).map((h) => {
-        const text = h.text?.trim().toLowerCase() || ''
-        const html = h.html_content?.trim().toLowerCase() || ''
-        return text || html
-      })
-    )
+    // Helper function to normalize text for comparison
+    const normalize = (text: string) => text.trim().toLowerCase().replace(/\s+/g, ' ')
+    
+    // Helper function to calculate similarity (simple Levenshtein-like approach)
+    const calculateSimilarity = (str1: string, str2: string): number => {
+      const s1 = normalize(str1)
+      const s2 = normalize(str2)
+      if (s1 === s2) return 1.0
+      if (s1.length === 0 || s2.length === 0) return 0.0
+      
+      // Simple similarity: check if one contains the other or vice versa
+      if (s1.includes(s2) || s2.includes(s1)) {
+        const longer = s1.length > s2.length ? s1 : s2
+        const shorter = s1.length > s2.length ? s2 : s1
+        return shorter.length / longer.length
+      }
+      
+      // Check word overlap
+      const words1 = s1.split(' ')
+      const words2 = s2.split(' ')
+      const commonWords = words1.filter(w => words2.includes(w))
+      return (commonWords.length * 2) / (words1.length + words2.length)
+    }
 
-    // Filter out duplicates
-    const newHighlights = highlights.filter((highlight) => {
-      const textNormalized = highlight.text.trim().toLowerCase()
-      const htmlNormalized = highlight.html.trim().toLowerCase()
-      const textMatch = textNormalized && existingTexts.has(textNormalized)
-      const htmlMatch = htmlNormalized && existingTexts.has(htmlNormalized)
-      return !textMatch && !htmlMatch
-    })
+    const newHighlights: typeof highlights = []
+    const updatedHighlights: Array<{ id: string; text: string; html: string }> = []
+    let skipped = 0
 
-    if (newHighlights.length === 0) {
-      return NextResponse.json({
-        message: 'All highlights already exist',
-        imported: 0,
-        skipped: highlights.length,
-      })
+    for (const highlight of highlights) {
+      const textNormalized = normalize(highlight.text)
+      const htmlNormalized = normalize(highlight.html)
+      
+      // Try to find a matching highlight
+      let matched = false
+      let bestMatch: { id: string; similarity: number } | null = null
+      
+      for (const existing of existingHighlights || []) {
+        const existingText = normalize(existing.text || '')
+        const existingHtml = normalize(existing.html_content || '')
+        
+        // Check exact match first
+        if (existingText === textNormalized || existingHtml === htmlNormalized ||
+            existingText === htmlNormalized || existingHtml === textNormalized) {
+          // Exact match - check if content has changed
+          const currentText = highlight.text.trim()
+          const currentHtml = highlight.html.trim()
+          const dbText = existing.text?.trim() || ''
+          const dbHtml = existing.html_content?.trim() || ''
+          
+          if (currentText !== dbText || currentHtml !== dbHtml) {
+            // Content has changed, update it
+            updatedHighlights.push({
+              id: existing.id,
+              text: currentText,
+              html: currentHtml,
+            })
+          } else {
+            skipped++
+          }
+          matched = true
+          break
+        }
+        
+        // Check similarity for fuzzy matching (if text is similar enough, consider it the same)
+        const textSimilarity = calculateSimilarity(highlight.text, existing.text || '')
+        const htmlSimilarity = existing.html_content 
+          ? calculateSimilarity(highlight.html, existing.html_content)
+          : 0
+        
+        const maxSimilarity = Math.max(textSimilarity, htmlSimilarity)
+        
+        // If similarity is high enough (>= 0.8), consider it a match
+        if (maxSimilarity >= 0.8) {
+          if (!bestMatch || maxSimilarity > bestMatch.similarity) {
+            bestMatch = { id: existing.id, similarity: maxSimilarity }
+          }
+        }
+      }
+      
+      // If we found a fuzzy match, update it
+      if (!matched && bestMatch) {
+        updatedHighlights.push({
+          id: bestMatch.id,
+          text: highlight.text.trim(),
+          html: highlight.html.trim(),
+        })
+        matched = true
+      }
+      
+      // If no match found, it's a new highlight
+      if (!matched) {
+        newHighlights.push(highlight)
+      }
+    }
+
+    // Update existing highlights that changed
+    let updatedCount = 0
+    for (const update of updatedHighlights) {
+      const { error: updateError } = await supabase
+        .from('highlights')
+        .update({
+          text: update.text,
+          html_content: update.html || null,
+        })
+        .eq('id', update.id)
+      
+      if (!updateError) {
+        updatedCount++
+      } else {
+        console.warn(`Failed to update highlight ${update.id}:`, updateError)
+      }
     }
 
     // Import new highlights
-    const highlightsToInsert = newHighlights.map((highlight) => ({
-      text: highlight.text.trim(),
-      html_content: highlight.html.trim() || null,
-      source: process.env.NOTION_SOURCE || null,
-      author: process.env.NOTION_AUTHOR || null,
-      resurface_count: 0,
-      average_rating: 0,
-      rating_count: 0,
-      archived: false,
-    }))
+    let importedCount = 0
+    if (newHighlights.length > 0) {
+      const highlightsToInsert = newHighlights.map((highlight) => ({
+        text: highlight.text.trim(),
+        html_content: highlight.html.trim() || null,
+        source: process.env.NOTION_SOURCE || null,
+        author: process.env.NOTION_AUTHOR || null,
+        resurface_count: 0,
+        average_rating: 0,
+        rating_count: 0,
+        archived: false,
+      }))
 
-    const { error: insertError } = await supabase
-      .from('highlights')
-      .insert(highlightsToInsert)
+      const { error: insertError } = await supabase
+        .from('highlights')
+        .insert(highlightsToInsert)
 
-    if (insertError) throw insertError
+      if (insertError) throw insertError
+      importedCount = newHighlights.length
+    }
 
     return NextResponse.json({
-      message: 'Import completed successfully',
-      imported: newHighlights.length,
-      skipped: highlights.length - newHighlights.length,
+      message: 'Sync completed successfully',
+      imported: importedCount,
+      updated: updatedCount,
+      skipped: skipped,
       total: highlights.length,
     })
   } catch (error: any) {

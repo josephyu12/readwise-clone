@@ -21,14 +21,50 @@ export default function HighlightsPage() {
   const [selectedText, setSelectedText] = useState('')
   const [linkTargetId, setLinkTargetId] = useState<string | null>(null)
   const [showArchived, setShowArchived] = useState(false)
+  const [currentPage, setCurrentPage] = useState(1)
+  const [itemsPerPage, setItemsPerPage] = useState(20)
+  const [totalHighlights, setTotalHighlights] = useState(0)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editText, setEditText] = useState('')
+  const [editHtmlContent, setEditHtmlContent] = useState('')
+  const [editSource, setEditSource] = useState('')
+  const [editAuthor, setEditAuthor] = useState('')
+  const [editCategories, setEditCategories] = useState<string[]>([])
+  const [updatingNotion, setUpdatingNotion] = useState(false)
+
+  useEffect(() => {
+    loadCategories()
+  }, [])
+
+  useEffect(() => {
+    setCurrentPage(1) // Reset to first page when filter changes
+  }, [showArchived])
 
   useEffect(() => {
     loadHighlights()
-    loadCategories()
-  }, [showArchived])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showArchived, currentPage, itemsPerPage])
 
   const loadHighlights = async () => {
     try {
+      setLoading(true)
+      
+      // First, get the total count
+      let countQuery = supabase
+        .from('highlights')
+        .select('*', { count: 'exact', head: true })
+
+      if (showArchived) {
+        countQuery = countQuery.eq('archived', true)
+      } else {
+        countQuery = countQuery.eq('archived', false)
+      }
+
+      const { count, error: countError } = await countQuery
+      if (countError) throw countError
+      setTotalHighlights(count || 0)
+
+      // Then get the paginated data
       let query = supabase
         .from('highlights')
         .select(`
@@ -61,7 +97,13 @@ export default function HighlightsPage() {
         query = query.eq('archived', false)
       }
 
-      const { data, error } = await query.order('created_at', { ascending: false })
+      // Apply pagination
+      const from = (currentPage - 1) * itemsPerPage
+      const to = from + itemsPerPage - 1
+
+      const { data, error } = await query
+        .order('created_at', { ascending: false })
+        .range(from, to)
 
       if (error) throw error
 
@@ -79,6 +121,8 @@ export default function HighlightsPage() {
       setLoading(false)
     }
   }
+
+  const totalPages = Math.ceil(totalHighlights / itemsPerPage)
 
   const loadCategories = async () => {
     try {
@@ -149,6 +193,29 @@ export default function HighlightsPage() {
         await supabase.from('highlight_categories').insert(categoryLinks)
       }
 
+      // Try to add to Notion (optional - don't fail if this fails)
+      try {
+        const response = await fetch('/api/notion/add', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            text: text.trim(),
+            htmlContent: htmlContent || null,
+          }),
+        })
+
+        if (!response.ok) {
+          const errorData = await response.json()
+          console.warn('Notion add failed:', errorData.error)
+          // Don't throw - database insert succeeded
+        }
+      } catch (notionError) {
+        console.warn('Notion add error:', notionError)
+        // Continue - database insert succeeded
+      }
+
       await loadHighlights()
       setText('')
       setHtmlContent('')
@@ -207,6 +274,93 @@ export default function HighlightsPage() {
     if (selection && selection.toString().trim()) {
       setSelectedText(selection.toString())
       setLinkTargetId(highlightId)
+    }
+  }
+
+  const handleStartEdit = (highlight: Highlight) => {
+    setEditingId(highlight.id)
+    setEditText(highlight.text)
+    setEditHtmlContent(highlight.html_content || highlight.text)
+    setEditSource(highlight.source || '')
+    setEditAuthor(highlight.author || '')
+    setEditCategories(highlight.categories?.map((c) => c.id) || [])
+  }
+
+  const handleCancelEdit = () => {
+    setEditingId(null)
+    setEditText('')
+    setEditHtmlContent('')
+    setEditSource('')
+    setEditAuthor('')
+    setEditCategories([])
+  }
+
+  const handleSaveEdit = async () => {
+    if (!editingId || !editText.trim()) return
+
+    try {
+      setUpdatingNotion(true)
+
+      // Update in database
+      const { error: updateError } = await supabase
+        .from('highlights')
+        .update({
+          text: editText.trim(),
+          html_content: editHtmlContent.trim() || null,
+          source: editSource.trim() || null,
+          author: editAuthor.trim() || null,
+        })
+        .eq('id', editingId)
+
+      if (updateError) throw updateError
+
+      // Update categories
+      // First, remove existing categories
+      await supabase
+        .from('highlight_categories')
+        .delete()
+        .eq('highlight_id', editingId)
+
+      // Then add new ones
+      if (editCategories.length > 0) {
+        const categoryLinks = editCategories.map((catId) => ({
+          highlight_id: editingId,
+          category_id: catId,
+        }))
+        await supabase.from('highlight_categories').insert(categoryLinks)
+      }
+
+      // Try to update in Notion
+      try {
+        const response = await fetch('/api/notion/update', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            highlightId: editingId,
+            text: editText.trim(),
+            htmlContent: editHtmlContent.trim(),
+          }),
+        })
+
+        if (!response.ok) {
+          const errorData = await response.json()
+          console.warn('Notion update failed:', errorData.error)
+          // Don't throw - database update succeeded, Notion update is optional
+        }
+      } catch (notionError) {
+        console.warn('Notion update error:', notionError)
+        // Continue - database update succeeded
+      }
+
+      await loadHighlights()
+      handleCancelEdit()
+    } catch (error) {
+      console.error('Error updating highlight:', error)
+      alert('Failed to update highlight. Please try again.')
+    } finally {
+      setUpdatingNotion(false)
     }
   }
 
@@ -395,9 +549,33 @@ export default function HighlightsPage() {
           </form>
 
           <div className="space-y-4">
-            <h2 className="text-2xl font-semibold text-gray-900 dark:text-white">
-              All Highlights ({highlights.length})
-            </h2>
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+              <h2 className="text-2xl font-semibold text-gray-900 dark:text-white">
+                All Highlights ({totalHighlights})
+              </h2>
+              <div className="flex items-center gap-2">
+                <label className="text-sm text-gray-600 dark:text-gray-400">
+                  Show:
+                </label>
+                <select
+                  value={itemsPerPage}
+                  onChange={(e) => {
+                    setItemsPerPage(Number(e.target.value))
+                    setCurrentPage(1)
+                  }}
+                  className="px-3 py-1 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm"
+                >
+                  <option value={5}>5</option>
+                  <option value={10}>10</option>
+                  <option value={20}>20</option>
+                  <option value={50}>50</option>
+                  <option value={100}>100</option>
+                </select>
+                <span className="text-sm text-gray-600 dark:text-gray-400">
+                  per page
+                </span>
+              </div>
+            </div>
             {highlights.length === 0 ? (
               <div className="bg-white dark:bg-gray-800 p-8 rounded-lg shadow-lg text-center text-gray-500 dark:text-gray-400">
                 No highlights yet. Add your first highlight above!
@@ -417,12 +595,100 @@ export default function HighlightsPage() {
                       Archived (marked low twice)
                     </div>
                   )}
-                  <div
-                    className="text-gray-800 dark:text-gray-200 mb-3 text-lg prose dark:prose-invert max-w-none"
-                    dangerouslySetInnerHTML={{
-                      __html: highlight.html_content || highlight.text,
-                    }}
-                  />
+                  {editingId === highlight.id ? (
+                    <div className="mb-4 space-y-4">
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                          Highlight Text *
+                        </label>
+                        <RichTextEditor
+                          value={editText}
+                          htmlValue={editHtmlContent}
+                          onChange={(plainText, html) => {
+                            setEditText(plainText)
+                            setEditHtmlContent(html)
+                          }}
+                          placeholder="Enter your highlight..."
+                        />
+                      </div>
+                      <div className="grid md:grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                            Source (optional)
+                          </label>
+                          <input
+                            type="text"
+                            value={editSource}
+                            onChange={(e) => setEditSource(e.target.value)}
+                            className="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent dark:bg-gray-700 dark:text-white"
+                            placeholder="Book, article, etc."
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                            Author (optional)
+                          </label>
+                          <input
+                            type="text"
+                            value={editAuthor}
+                            onChange={(e) => setEditAuthor(e.target.value)}
+                            className="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent dark:bg-gray-700 dark:text-white"
+                            placeholder="Author name"
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                          Categories
+                        </label>
+                        <div className="flex flex-wrap gap-2">
+                          {categories.map((cat) => (
+                            <button
+                              key={cat.id}
+                              type="button"
+                              onClick={() => {
+                                if (editCategories.includes(cat.id)) {
+                                  setEditCategories(editCategories.filter((id) => id !== cat.id))
+                                } else {
+                                  setEditCategories([...editCategories, cat.id])
+                                }
+                              }}
+                              className={`px-3 py-1 text-sm rounded-full transition ${
+                                editCategories.includes(cat.id)
+                                  ? 'bg-blue-600 text-white'
+                                  : 'bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-gray-600'
+                              }`}
+                            >
+                              {cat.name}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={handleSaveEdit}
+                          disabled={updatingNotion || !editText.trim()}
+                          className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition disabled:bg-gray-400 disabled:cursor-not-allowed"
+                        >
+                          {updatingNotion ? 'Saving...' : 'Save'}
+                        </button>
+                        <button
+                          onClick={handleCancelEdit}
+                          disabled={updatingNotion}
+                          className="px-4 py-2 bg-gray-200 dark:bg-gray-700 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-600 transition disabled:opacity-50"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div
+                      className="highlight-content text-base mb-3 prose dark:prose-invert max-w-none"
+                      dangerouslySetInnerHTML={{
+                        __html: highlight.html_content || highlight.text,
+                      }}
+                    />
+                  )}
                   {highlight.categories && highlight.categories.length > 0 && (
                     <div className="flex flex-wrap gap-2 mb-3">
                       {highlight.categories.map((cat) => (
@@ -486,42 +752,94 @@ export default function HighlightsPage() {
                       )}
                     </div>
                     <div className="flex gap-2">
-                      {linkingMode && selectedText && linkTargetId !== highlight.id && (
-                        <button
-                          onClick={() => handleCreateLink(linkTargetId!, highlight.id, selectedText)}
-                          className="px-3 py-1 text-sm bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300 rounded hover:bg-green-200 dark:hover:bg-green-800 transition"
-                        >
-                          Link to &quot;{selectedText.substring(0, 20)}...&quot;
-                        </button>
+                      {editingId !== highlight.id && (
+                        <>
+                          {linkingMode && selectedText && linkTargetId !== highlight.id && (
+                            <button
+                              onClick={() => handleCreateLink(linkTargetId!, highlight.id, selectedText)}
+                              className="px-3 py-1 text-sm bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300 rounded hover:bg-green-200 dark:hover:bg-green-800 transition"
+                            >
+                              Link to &quot;{selectedText.substring(0, 20)}...&quot;
+                            </button>
+                          )}
+                          <button
+                            onClick={() => handleStartEdit(highlight)}
+                            className="px-3 py-1 text-sm bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300 rounded hover:bg-blue-200 dark:hover:bg-blue-800 transition"
+                          >
+                            Edit
+                          </button>
+                          {highlight.archived && (
+                            <button
+                              onClick={async () => {
+                                try {
+                                  await supabase
+                                    .from('highlights')
+                                    .update({ archived: false })
+                                    .eq('id', highlight.id)
+                                  await loadHighlights()
+                                } catch (error) {
+                                  console.error('Error unarchiving highlight:', error)
+                                }
+                              }}
+                              className="px-3 py-1 text-sm bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300 rounded hover:bg-blue-200 dark:hover:bg-blue-800 transition"
+                            >
+                              Unarchive
+                            </button>
+                          )}
+                          <button
+                            onClick={() => handleDelete(highlight.id)}
+                            className="px-3 py-1 text-sm bg-red-100 dark:bg-red-900 text-red-700 dark:text-red-300 rounded hover:bg-red-200 dark:hover:bg-red-800 transition"
+                          >
+                            Delete
+                          </button>
+                        </>
                       )}
-                      {highlight.archived && (
-                        <button
-                          onClick={async () => {
-                            try {
-                              await supabase
-                                .from('highlights')
-                                .update({ archived: false })
-                                .eq('id', highlight.id)
-                              await loadHighlights()
-                            } catch (error) {
-                              console.error('Error unarchiving highlight:', error)
-                            }
-                          }}
-                          className="px-3 py-1 text-sm bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300 rounded hover:bg-blue-200 dark:hover:bg-blue-800 transition"
-                        >
-                          Unarchive
-                        </button>
-                      )}
-                      <button
-                        onClick={() => handleDelete(highlight.id)}
-                        className="px-3 py-1 text-sm bg-red-100 dark:bg-red-900 text-red-700 dark:text-red-300 rounded hover:bg-red-200 dark:hover:bg-red-800 transition"
-                      >
-                        Delete
-                      </button>
                     </div>
                   </div>
                 </div>
               ))
+            )}
+
+            {/* Pagination Controls */}
+            {totalPages > 1 && (
+              <div className="flex flex-col sm:flex-row justify-between items-center gap-4 pt-4 border-t border-gray-200 dark:border-gray-700">
+                <div className="text-sm text-gray-600 dark:text-gray-400">
+                  Showing {((currentPage - 1) * itemsPerPage) + 1} to {Math.min(currentPage * itemsPerPage, totalHighlights)} of {totalHighlights} highlights
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setCurrentPage(1)}
+                    disabled={currentPage === 1}
+                    className="px-3 py-1 text-sm bg-gray-200 dark:bg-gray-700 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-600 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    First
+                  </button>
+                  <button
+                    onClick={() => setCurrentPage(currentPage - 1)}
+                    disabled={currentPage === 1}
+                    className="px-3 py-1 text-sm bg-gray-200 dark:bg-gray-700 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-600 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Previous
+                  </button>
+                  <span className="px-3 py-1 text-sm text-gray-700 dark:text-gray-300">
+                    Page {currentPage} of {totalPages}
+                  </span>
+                  <button
+                    onClick={() => setCurrentPage(currentPage + 1)}
+                    disabled={currentPage === totalPages}
+                    className="px-3 py-1 text-sm bg-gray-200 dark:bg-gray-700 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-600 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Next
+                  </button>
+                  <button
+                    onClick={() => setCurrentPage(totalPages)}
+                    disabled={currentPage === totalPages}
+                    className="px-3 py-1 text-sm bg-gray-200 dark:bg-gray-700 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-600 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Last
+                  </button>
+                </div>
+              </div>
             )}
           </div>
         </div>

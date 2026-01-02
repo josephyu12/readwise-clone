@@ -89,3 +89,16 @@ body {
   }
 }
 
+/* Highlight content styles - force black text for all highlight displays */
+.highlight-content,
+.highlight-content * {
+  color: #000000 !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  .highlight-content,
+  .highlight-content * {
+    color: #ffffff !important;
+  }
+}
+

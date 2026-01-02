@@ -1,0 +1,378 @@
+import { NextRequest, NextResponse } from 'next/server'
+import { Client } from '@notionhq/client'
+
+// Convert HTML to Notion rich text format (simplified version)
+function htmlToNotionRichText(html: string): any[] {
+  if (!html || html.trim() === '') {
+    return []
+  }
+
+  // Simple HTML to text converter
+  function stripHtml(html: string): string {
+    return html
+      .replace(/<[^>]*>/g, '')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .trim()
+  }
+
+  const richText: any[] = []
+  const plainText = stripHtml(html)
+  
+  if (plainText) {
+    // Check if the original HTML had bold/italic/underline
+    const hasBold = /<strong|<b/i.test(html)
+    const hasItalic = /<em|<i/i.test(html)
+    const hasUnderline = /<u/i.test(html)
+    const hasCode = /<code/i.test(html)
+    
+    // Extract links
+    const linkRegex = /<a\s+href=["']([^"']+)["'][^>]*>(.*?)<\/a>/gi
+    let linkMatch
+    const links: Array<{ href: string; text: string; start: number; end: number }> = []
+    
+    while ((linkMatch = linkRegex.exec(html)) !== null) {
+      const linkText = stripHtml(linkMatch[2])
+      const linkStart = plainText.indexOf(linkText)
+      if (linkStart !== -1) {
+        links.push({
+          href: linkMatch[1],
+          text: linkText,
+          start: linkStart,
+          end: linkStart + linkText.length,
+        })
+      }
+    }
+    
+    // Split text into segments (with links)
+    let currentPos = 0
+    const sortedLinks = links.sort((a, b) => a.start - b.start)
+    
+    for (const link of sortedLinks) {
+      // Add text before link
+      if (link.start > currentPos) {
+        const beforeText = plainText.substring(currentPos, link.start)
+        if (beforeText) {
+          richText.push({
+            type: 'text',
+            text: { content: beforeText },
+            annotations: {
+              bold: hasBold,
+              italic: hasItalic,
+              strikethrough: false,
+              underline: hasUnderline,
+              code: hasCode,
+              color: 'default',
+            },
+            plain_text: beforeText,
+          })
+        }
+      }
+      
+      // Add link
+      richText.push({
+        type: 'text',
+        text: { content: link.text, link: { url: link.href } },
+        annotations: {
+          bold: hasBold,
+          italic: hasItalic,
+          strikethrough: false,
+          underline: hasUnderline,
+          code: hasCode,
+          color: 'default',
+        },
+        plain_text: link.text,
+      })
+      
+      currentPos = link.end
+    }
+    
+    // Add remaining text
+    if (currentPos < plainText.length) {
+      const remainingText = plainText.substring(currentPos)
+      if (remainingText) {
+        richText.push({
+          type: 'text',
+          text: { content: remainingText },
+          annotations: {
+            bold: hasBold,
+            italic: hasItalic,
+            strikethrough: false,
+            underline: hasUnderline,
+            code: hasCode,
+            color: 'default',
+          },
+          plain_text: remainingText,
+        })
+      }
+    }
+    
+    // If no links, add entire text as one segment
+    if (richText.length === 0) {
+      richText.push({
+        type: 'text',
+        text: { content: plainText },
+        annotations: {
+          bold: hasBold,
+          italic: hasItalic,
+          strikethrough: false,
+          underline: hasUnderline,
+          code: hasCode,
+          color: 'default',
+        },
+        plain_text: plainText,
+      })
+    }
+  }
+  
+  return richText.length > 0 ? richText : [{
+    type: 'text',
+    text: { content: plainText || html },
+    annotations: {
+      bold: false,
+      italic: false,
+      strikethrough: false,
+      underline: false,
+      code: false,
+      color: 'default',
+    },
+    plain_text: plainText || html,
+  }]
+}
+
+// Convert HTML to Notion blocks
+function htmlToNotionBlocks(html: string): any[] {
+  if (!html || html.trim() === '') {
+    return [{
+      type: 'paragraph',
+      paragraph: { rich_text: [] },
+    }]
+  }
+
+  const blocks: any[] = []
+  
+  // Extract list items
+  const ulRegex = /<ul[^>]*>(.*?)<\/ul>/gis
+  const olRegex = /<ol[^>]*>(.*?)<\/ol>/gis
+  
+  // Process unordered lists
+  let ulMatch
+  while ((ulMatch = ulRegex.exec(html)) !== null) {
+    const listContent = ulMatch[1]
+    const liRegex = /<li[^>]*>(.*?)<\/li>/gis
+    let liMatch
+    while ((liMatch = liRegex.exec(listContent)) !== null) {
+      const richText = htmlToNotionRichText(liMatch[1])
+      if (richText.length > 0) {
+        blocks.push({
+          type: 'bulleted_list_item',
+          bulleted_list_item: { rich_text: richText },
+        })
+      }
+    }
+  }
+  
+  // Process ordered lists
+  let olMatch
+  while ((olMatch = olRegex.exec(html)) !== null) {
+    const listContent = olMatch[1]
+    const liRegex = /<li[^>]*>(.*?)<\/li>/gis
+    let liMatch
+    while ((liMatch = liRegex.exec(listContent)) !== null) {
+      const richText = htmlToNotionRichText(liMatch[1])
+      if (richText.length > 0) {
+        blocks.push({
+          type: 'numbered_list_item',
+          numbered_list_item: { rich_text: richText },
+        })
+      }
+    }
+  }
+  
+  // Remove processed lists from HTML
+  let remainingHtml = html
+    .replace(/<ul[^>]*>.*?<\/ul>/gis, '')
+    .replace(/<ol[^>]*>.*?<\/ol>/gis, '')
+  
+  // Process headings
+  const h1Regex = /<h1[^>]*>(.*?)<\/h1>/gi
+  let h1Match
+  while ((h1Match = h1Regex.exec(remainingHtml)) !== null) {
+    const richText = htmlToNotionRichText(h1Match[1])
+    if (richText.length > 0) {
+      blocks.push({
+        type: 'heading_1',
+        heading_1: { rich_text: richText },
+      })
+    }
+    remainingHtml = remainingHtml.replace(h1Match[0], '')
+  }
+  
+  const h2Regex = /<h2[^>]*>(.*?)<\/h2>/gi
+  let h2Match
+  while ((h2Match = h2Regex.exec(remainingHtml)) !== null) {
+    const richText = htmlToNotionRichText(h2Match[1])
+    if (richText.length > 0) {
+      blocks.push({
+        type: 'heading_2',
+        heading_2: { rich_text: richText },
+      })
+    }
+    remainingHtml = remainingHtml.replace(h2Match[0], '')
+  }
+  
+  const h3Regex = /<h3[^>]*>(.*?)<\/h3>/gi
+  let h3Match
+  while ((h3Match = h3Regex.exec(remainingHtml)) !== null) {
+    const richText = htmlToNotionRichText(h3Match[1])
+    if (richText.length > 0) {
+      blocks.push({
+        type: 'heading_3',
+        heading_3: { rich_text: richText },
+      })
+    }
+    remainingHtml = remainingHtml.replace(h3Match[0], '')
+  }
+  
+  // Process blockquotes
+  const blockquoteRegex = /<blockquote[^>]*>(.*?)<\/blockquote>/gi
+  let blockquoteMatch
+  while ((blockquoteMatch = blockquoteRegex.exec(remainingHtml)) !== null) {
+    const richText = htmlToNotionRichText(blockquoteMatch[1])
+    if (richText.length > 0) {
+      blocks.push({
+        type: 'quote',
+        quote: { rich_text: richText },
+      })
+    }
+    remainingHtml = remainingHtml.replace(blockquoteMatch[0], '')
+  }
+  
+  // Process code blocks
+  const preRegex = /<pre[^>]*>(.*?)<\/pre>/gis
+  let preMatch
+  while ((preMatch = preRegex.exec(remainingHtml)) !== null) {
+    const code = remainingHtml.substring(preMatch.index, preMatch.index + preMatch[0].length)
+      .replace(/<[^>]*>/g, '')
+      .trim()
+    if (code) {
+      blocks.push({
+        type: 'code',
+        code: {
+          rich_text: [{
+            type: 'text',
+            text: { content: code },
+            annotations: {
+              bold: false,
+              italic: false,
+              strikethrough: false,
+              underline: false,
+              code: false,
+              color: 'default',
+            },
+            plain_text: code,
+          }],
+          language: 'plain text',
+        },
+      })
+    }
+    remainingHtml = remainingHtml.replace(preMatch[0], '')
+  }
+  
+  // Process paragraphs (what's left)
+  const pRegex = /<p[^>]*>(.*?)<\/p>/gi
+  let pMatch
+  while ((pMatch = pRegex.exec(remainingHtml)) !== null) {
+    const richText = htmlToNotionRichText(pMatch[1])
+    if (richText.length > 0 || pMatch[1].trim() === '') {
+      blocks.push({
+        type: 'paragraph',
+        paragraph: { rich_text: richText },
+      })
+    }
+  }
+  
+  // If no blocks were created, create a paragraph with the remaining content
+  if (blocks.length === 0) {
+    const plainText = remainingHtml.replace(/<[^>]*>/g, '').trim()
+    if (plainText) {
+      const richText = htmlToNotionRichText(html)
+      blocks.push({
+        type: 'paragraph',
+        paragraph: { rich_text: richText },
+      })
+    }
+  }
+  
+  return blocks.length > 0 ? blocks : [{
+    type: 'paragraph',
+    paragraph: { rich_text: htmlToNotionRichText(html) },
+  }]
+}
+
+export async function POST(request: NextRequest) {
+  try {
+    const { text, htmlContent } = await request.json()
+
+    if (!text) {
+      return NextResponse.json(
+        { error: 'Text is required' },
+        { status: 400 }
+      )
+    }
+
+    // Get Notion credentials from environment
+    const notionApiKey = process.env.NOTION_API_KEY
+    const notionPageId = process.env.NOTION_PAGE_ID
+
+    if (!notionApiKey || !notionPageId) {
+      return NextResponse.json(
+        { error: 'Notion API key and Page ID must be set in environment variables' },
+        { status: 400 }
+      )
+    }
+
+    // Initialize Notion client
+    const notion = new Client({
+      auth: notionApiKey,
+    })
+
+    // Convert HTML to Notion blocks
+    const blocks = htmlToNotionBlocks(htmlContent || text)
+
+    if (blocks.length === 0) {
+      return NextResponse.json(
+        { error: 'Failed to convert content to Notion format' },
+        { status: 400 }
+      )
+    }
+
+    // Add an empty paragraph as separator (to mark end of this highlight)
+    blocks.push({
+      type: 'paragraph',
+      paragraph: { rich_text: [] },
+    })
+
+    // Append blocks to Notion page
+    await notion.blocks.children.append({
+      block_id: notionPageId,
+      children: blocks,
+    })
+
+    return NextResponse.json({
+      message: 'Highlight added to Notion successfully',
+      success: true,
+    })
+  } catch (error: any) {
+    console.error('Error adding highlight to Notion:', error)
+    return NextResponse.json(
+      { error: error.message || 'Failed to add highlight to Notion' },
+      { status: 500 }
+    )
+  }
+}
+

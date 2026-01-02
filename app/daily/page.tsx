@@ -344,7 +344,7 @@ export default function DailyPage() {
                         className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg"
                       >
                         <div
-                          className="text-gray-800 dark:text-gray-200 mb-3 text-lg prose dark:prose-invert max-w-none"
+                          className="highlight-content text-base mb-3 prose dark:prose-invert max-w-none"
                           dangerouslySetInnerHTML={{
                             __html: highlight.html_content || highlight.text,
                           }}
