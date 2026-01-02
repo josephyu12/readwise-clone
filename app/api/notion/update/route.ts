@@ -149,11 +149,6 @@ function htmlToNotionBlocks(html: string): any[] {
 
   const blocks: any[] = []
   
-  // Split by block-level elements
-  // Match paragraphs, headings, lists, etc.
-  const blockRegex = /<(p|h1|h2|h3|ul|ol|blockquote|pre)[^>]*>(.*?)<\/\1>)|([^<]+/gi
-  let match
-  
   // Extract list items separately
   const ulRegex = /<ul[^>]*>(.*?)<\/ul>/gis
   const olRegex = /<ol[^>]*>(.*?)<\/ol>/gis
