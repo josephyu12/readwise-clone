@@ -392,6 +392,12 @@ export default function HighlightsPage() {
                 {showArchived ? 'Show Active' : 'Show Archived'}
               </button>
               <Link
+                href="/search"
+                className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition"
+              >
+                Search
+              </Link>
+              <Link
                 href="/import"
                 className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition"
               >

@@ -12,7 +12,7 @@ export default function Home() {
             Resurface your highlights in daily summaries
           </p>
           
-          <div className="grid md:grid-cols-3 gap-6 mt-12">
+          <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-6 mt-12">
             <Link
               href="/highlights"
               className="block p-6 bg-white dark:bg-gray-800 rounded-lg shadow-lg hover:shadow-xl transition-shadow"
@@ -22,6 +22,18 @@ export default function Home() {
               </h2>
               <p className="text-gray-600 dark:text-gray-300">
                 Add, edit, and organize your highlights
+              </p>
+            </Link>
+            
+            <Link
+              href="/search"
+              className="block p-6 bg-white dark:bg-gray-800 rounded-lg shadow-lg hover:shadow-xl transition-shadow"
+            >
+              <h2 className="text-2xl font-semibold text-gray-900 dark:text-white mb-2">
+                Search Highlights
+              </h2>
+              <p className="text-gray-600 dark:text-gray-300">
+                Full-text and semantic search
               </p>
             </Link>
             

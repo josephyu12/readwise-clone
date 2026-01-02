@@ -1,6 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { Client } from '@notionhq/client'
-import { supabase } from '@/lib/supabase'
+import { createClient } from '@supabase/supabase-js'
+
+// Create Supabase client for server-side use
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || ''
+const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || 
+                    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ''
+const supabase = createClient(supabaseUrl, supabaseKey)
 
 // Simple HTML to text converter (removes HTML tags)
 function stripHtml(html: string): string {
