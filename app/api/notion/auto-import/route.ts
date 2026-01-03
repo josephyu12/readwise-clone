@@ -147,10 +147,10 @@ export async function GET(request: NextRequest) {
     let currentHighlightBlocks: any[] = []
 
     for (let i = 0; i < blocks.length; i++) {
-      const block = blocks[i]
+      const block = blocks[i] as any
       const isParagraph = block.type === 'paragraph'
       const isEmpty = isParagraph &&
-        (!block.paragraph.rich_text || block.paragraph.rich_text.length === 0)
+        (!block.paragraph?.rich_text || block.paragraph.rich_text.length === 0)
 
       if (isEmpty && currentHighlightBlocks.length > 0) {
         const html = blocksToHTML(currentHighlightBlocks)

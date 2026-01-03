@@ -19,7 +19,8 @@ export default function RichTextEditor({ value, htmlValue, onChange, placeholder
     } else if (editorRef.current && !htmlValue && value) {
       editorRef.current.textContent = value
     }
-  }, [])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []) // Only run on mount to set initial value
 
   const handleInput = () => {
     if (editorRef.current) {
