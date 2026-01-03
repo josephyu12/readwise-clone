@@ -27,61 +27,155 @@ function notionRichTextToHTML(richText: any[]): string {
   }).join('')
 }
 
-function blocksToHTML(blocks: any[]): string {
-  let html = ''
+// Recursively fetch children blocks for a list item
+async function fetchBlockChildren(notion: Client, blockId: string): Promise<any[]> {
+  const children: any[] = []
+  let cursor = undefined
   
-  for (const block of blocks) {
+  do {
+    const response = await notion.blocks.children.list({
+      block_id: blockId,
+      start_cursor: cursor,
+    })
+    children.push(...response.results)
+    cursor = response.next_cursor || undefined
+  } while (cursor)
+  
+  return children
+}
+
+// Convert Notion blocks to HTML, preserving formatting and nested lists
+async function blocksToHTML(blocks: any[], notion?: Client): Promise<string> {
+  let html = ''
+  let i = 0
+  
+  while (i < blocks.length) {
+    const block = blocks[i] as any
+    
     switch (block.type) {
       case 'paragraph':
-        if (block.paragraph.rich_text && block.paragraph.rich_text.length > 0) {
+        if (block.paragraph?.rich_text && block.paragraph.rich_text.length > 0) {
           html += `<p>${notionRichTextToHTML(block.paragraph.rich_text)}</p>`
         } else {
           html += '<p><br></p>'
         }
+        i++
         break
       case 'heading_1':
-        if (block.heading_1.rich_text && block.heading_1.rich_text.length > 0) {
+        if (block.heading_1?.rich_text && block.heading_1.rich_text.length > 0) {
           html += `<h1>${notionRichTextToHTML(block.heading_1.rich_text)}</h1>`
         }
+        i++
         break
       case 'heading_2':
-        if (block.heading_2.rich_text && block.heading_2.rich_text.length > 0) {
+        if (block.heading_2?.rich_text && block.heading_2.rich_text.length > 0) {
           html += `<h2>${notionRichTextToHTML(block.heading_2.rich_text)}</h2>`
         }
+        i++
         break
       case 'heading_3':
-        if (block.heading_3.rich_text && block.heading_3.rich_text.length > 0) {
+        if (block.heading_3?.rich_text && block.heading_3.rich_text.length > 0) {
           html += `<h3>${notionRichTextToHTML(block.heading_3.rich_text)}</h3>`
         }
+        i++
         break
       case 'bulleted_list_item':
-        if (block.bulleted_list_item.rich_text && block.bulleted_list_item.rich_text.length > 0) {
-          html += `<ul><li>${notionRichTextToHTML(block.bulleted_list_item.rich_text)}</li></ul>`
+        // Group consecutive bulleted list items at the same level
+        const bulletedItems: any[] = []
+        while (i < blocks.length && (blocks[i] as any).type === 'bulleted_list_item') {
+          bulletedItems.push(blocks[i])
+          i++
         }
+        
+        // Build nested list structure
+        html += '<ul>'
+        for (const item of bulletedItems) {
+          const itemText = item.bulleted_list_item?.rich_text 
+            ? notionRichTextToHTML(item.bulleted_list_item.rich_text)
+            : ''
+          
+          // Check if this item has children (nested lists)
+          // Try to fetch children - Notion API may not always set has_children correctly
+          let nestedContent = ''
+          if (notion && item.id) {
+            try {
+              const children = await fetchBlockChildren(notion, item.id)
+              if (children && children.length > 0) {
+                // Process children recursively - they might be nested list items
+                nestedContent = await blocksToHTML(children, notion)
+              }
+            } catch (error: any) {
+              // Silently fail - not all blocks have children or might not be accessible
+              // This is expected for list items without nested content
+            }
+          }
+          
+          html += `<li>${itemText}${nestedContent}</li>`
+        }
+        html += '</ul>'
         break
       case 'numbered_list_item':
-        if (block.numbered_list_item.rich_text && block.numbered_list_item.rich_text.length > 0) {
-          html += `<ol><li>${notionRichTextToHTML(block.numbered_list_item.rich_text)}</li></ol>`
+        // Group consecutive numbered list items at the same level
+        const numberedItems: any[] = []
+        while (i < blocks.length && (blocks[i] as any).type === 'numbered_list_item') {
+          numberedItems.push(blocks[i])
+          i++
         }
+        
+        // Build nested list structure
+        html += '<ol>'
+        for (const item of numberedItems) {
+          const itemText = item.numbered_list_item?.rich_text 
+            ? notionRichTextToHTML(item.numbered_list_item.rich_text)
+            : ''
+          
+          // Check if this item has children (nested lists)
+          // Try to fetch children - Notion API may not always set has_children correctly
+          let nestedContent = ''
+          if (notion && item.id) {
+            try {
+              const children = await fetchBlockChildren(notion, item.id)
+              if (children && children.length > 0) {
+                // Process children recursively - they might be nested list items
+                nestedContent = await blocksToHTML(children, notion)
+              }
+            } catch (error: any) {
+              // Silently fail - not all blocks have children or might not be accessible
+              // This is expected for list items without nested content
+            }
+          }
+          
+          html += `<li>${itemText}${nestedContent}</li>`
+        }
+        html += '</ol>'
         break
       case 'quote':
-        if (block.quote.rich_text && block.quote.rich_text.length > 0) {
+        if (block.quote?.rich_text && block.quote.rich_text.length > 0) {
           html += `<blockquote>${notionRichTextToHTML(block.quote.rich_text)}</blockquote>`
         }
+        i++
         break
       case 'code':
-        if (block.code.rich_text && block.code.rich_text.length > 0) {
+        if (block.code?.rich_text && block.code.rich_text.length > 0) {
           const code = block.code.rich_text.map((t: any) => t.plain_text).join('')
           html += `<pre><code>${code}</code></pre>`
         }
+        i++
         break
       case 'divider':
         html += '<hr>'
+        i++
+        break
+      case 'toggle':
+        // Skip toggle blocks - don't include them in HTML
+        // Also skip any children (they should be handled by the parent processing)
+        i++
         break
       default:
         if (block[block.type]?.rich_text) {
           html += `<p>${notionRichTextToHTML(block[block.type].rich_text)}</p>`
         }
+        i++
     }
   }
   
@@ -143,17 +237,24 @@ export async function GET(request: NextRequest) {
     } while (cursor)
 
     // Process blocks and split by empty lines
+    // Skip toggle blocks entirely (their children are nested and won't appear in top-level blocks)
     const highlights: { text: string; html: string }[] = []
     let currentHighlightBlocks: any[] = []
 
     for (let i = 0; i < blocks.length; i++) {
       const block = blocks[i] as any
+      
+      // Skip toggle blocks entirely - their nested children won't be in the top-level blocks array
+      if (block.type === 'toggle') {
+        continue
+      }
+      
       const isParagraph = block.type === 'paragraph'
       const isEmpty = isParagraph &&
         (!block.paragraph?.rich_text || block.paragraph.rich_text.length === 0)
 
       if (isEmpty && currentHighlightBlocks.length > 0) {
-        const html = blocksToHTML(currentHighlightBlocks)
+        const html = await blocksToHTML(currentHighlightBlocks, notion)
         const text = blocksToText(currentHighlightBlocks)
 
         if (text.trim().length > 0) {
@@ -170,7 +271,7 @@ export async function GET(request: NextRequest) {
     }
 
     if (currentHighlightBlocks.length > 0) {
-      const html = blocksToHTML(currentHighlightBlocks)
+      const html = await blocksToHTML(currentHighlightBlocks, notion)
       const text = blocksToText(currentHighlightBlocks)
 
       if (text.trim().length > 0) {
