@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { supabase } from '@/lib/supabase'
+import { createClient } from '@/lib/supabase/client'
 import Link from 'next/link'
 
 interface HighlightPreview {
@@ -10,6 +10,7 @@ interface HighlightPreview {
 }
 
 export default function ImportPage() {
+  const supabase = createClient()
   const [loading, setLoading] = useState(false)
   const [fetching, setFetching] = useState(false)
   const [progress, setProgress] = useState({ current: 0, total: 0 })
@@ -122,6 +123,10 @@ export default function ImportPage() {
         return
       }
 
+      // Get current user
+      const { data: { user } } = await supabase.auth.getUser()
+      if (!user) throw new Error('Not authenticated')
+
       // Import only new highlights in batches
       const batchSize = 10
       let imported = 0
@@ -137,6 +142,7 @@ export default function ImportPage() {
           resurface_count: 0,
           average_rating: 0,
           rating_count: 0,
+          user_id: user.id,
         }))
 
         const { error: insertError } = await supabase

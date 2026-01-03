@@ -1,12 +1,13 @@
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
-import { supabase } from '@/lib/supabase'
+import { createClient } from '@/lib/supabase/client'
 import { DailySummary, DailySummaryHighlight } from '@/types/database'
 import Link from 'next/link'
 import { format } from 'date-fns'
 
 export default function DailyPage() {
+  const supabase = createClient()
   const [summary, setSummary] = useState<DailySummary | null>(null)
   const [loading, setLoading] = useState(true)
   const [date, setDate] = useState(format(new Date(), 'yyyy-MM-dd'))
@@ -176,11 +177,15 @@ export default function DailyPage() {
 
       if (highlightsError) throw highlightsError
 
+      // Get current user
+      const { data: { user } } = await supabase.auth.getUser()
+      if (!user) throw new Error('Not authenticated')
+
       if (!allHighlights || allHighlights.length === 0) {
         // No highlights, but create empty summary
         const { error: insertError } = await supabase
           .from('daily_summaries')
-          .insert([{ date: selectedDate }])
+          .insert([{ date: selectedDate, user_id: user.id }])
 
         if (insertError) throw insertError
         return
@@ -205,7 +210,7 @@ export default function DailyPage() {
         // All highlights have been reviewed this month, create empty summary
         const { error: insertError } = await supabase
           .from('daily_summaries')
-          .insert([{ date: selectedDate }])
+          .insert([{ date: selectedDate, user_id: user.id }])
 
         if (insertError) throw insertError
         return
@@ -227,7 +232,7 @@ export default function DailyPage() {
         // No highlights for today, create empty summary
         const { error: insertError } = await supabase
           .from('daily_summaries')
-          .insert([{ date: selectedDate }])
+          .insert([{ date: selectedDate, user_id: user.id }])
 
         if (insertError) throw insertError
         return
@@ -236,7 +241,7 @@ export default function DailyPage() {
       // Create daily summary
       const { data: summaryData, error: summaryError } = await supabase
         .from('daily_summaries')
-        .insert([{ date: selectedDate }])
+        .insert([{ date: selectedDate, user_id: user.id }])
         .select()
         .single()
 

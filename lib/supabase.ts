@@ -1,12 +1,7 @@
-import { createClient } from '@supabase/supabase-js'
+// This file is kept for backward compatibility
+// New code should use @/lib/supabase/client for client components
+// and @/lib/supabase/server for server components
+import { createClient as createBrowserClient } from '@/lib/supabase/client'
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || ''
-// Supports both new publishable keys (sb_publishable_...) and legacy anon keys (JWT-based)
-// See: https://supabase.com/docs/guides/api/api-keys
-const supabaseAnonKey = 
-  process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || 
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || 
-  ''
-
-export const supabase = createClient(supabaseUrl, supabaseAnonKey)
+export const supabase = createBrowserClient()
 

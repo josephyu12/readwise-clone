@@ -1,12 +1,14 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { supabase } from '@/lib/supabase'
+import { createClient } from '@/lib/supabase/client'
 import { Highlight, Category } from '@/types/database'
 import Link from 'next/link'
 import RichTextEditor from '@/components/RichTextEditor'
+import { useDebounce } from '@/hooks/useDebounce'
 
 export default function HighlightsPage() {
+  const supabase = createClient()
   const [highlights, setHighlights] = useState<Highlight[]>([])
   const [categories, setCategories] = useState<Category[]>([])
   const [loading, setLoading] = useState(true)
@@ -17,9 +19,6 @@ export default function HighlightsPage() {
   const [selectedCategories, setSelectedCategories] = useState<string[]>([])
   const [newCategoryName, setNewCategoryName] = useState('')
   const [showCategoryInput, setShowCategoryInput] = useState(false)
-  const [linkingMode, setLinkingMode] = useState(false)
-  const [selectedText, setSelectedText] = useState('')
-  const [linkTargetId, setLinkTargetId] = useState<string | null>(null)
   const [showArchived, setShowArchived] = useState(false)
   const [currentPage, setCurrentPage] = useState(1)
   const [itemsPerPage, setItemsPerPage] = useState(20)
@@ -31,10 +30,25 @@ export default function HighlightsPage() {
   const [editAuthor, setEditAuthor] = useState('')
   const [editCategories, setEditCategories] = useState<string[]>([])
   const [updatingNotion, setUpdatingNotion] = useState(false)
+  const [linkingMode, setLinkingMode] = useState(false)
+  const [selectedLinkText, setSelectedLinkText] = useState('')
+  const [linkSearchQuery, setLinkSearchQuery] = useState('')
+  const [linkSearchResults, setLinkSearchResults] = useState<Highlight[]>([])
+  const [showLinkSearch, setShowLinkSearch] = useState(false)
+
+  const debouncedLinkSearchQuery = useDebounce(linkSearchQuery, 300)
 
   useEffect(() => {
     loadCategories()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  useEffect(() => {
+    if (showLinkSearch && linkingMode) {
+      performLinkSearch(debouncedLinkSearchQuery)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debouncedLinkSearchQuery, showLinkSearch, linkingMode])
 
   useEffect(() => {
     setCurrentPage(1) // Reset to first page when filter changes
@@ -142,9 +156,13 @@ export default function HighlightsPage() {
     if (!newCategoryName.trim()) return
 
     try {
+      // Get current user
+      const { data: { user } } = await supabase.auth.getUser()
+      if (!user) throw new Error('Not authenticated')
+
       const { data, error } = await supabase
         .from('categories')
-        .insert([{ name: newCategoryName.trim() }])
+        .insert([{ name: newCategoryName.trim(), user_id: user.id }])
         .select()
         .single()
 
@@ -165,6 +183,10 @@ export default function HighlightsPage() {
     if (!text.trim()) return
 
     try {
+      // Get current user
+      const { data: { user } } = await supabase.auth.getUser()
+      if (!user) throw new Error('Not authenticated')
+
       const { data, error } = await supabase
         .from('highlights')
         .insert([
@@ -176,6 +198,7 @@ export default function HighlightsPage() {
             resurface_count: 0,
             average_rating: 0,
             rating_count: 0,
+            user_id: user.id,
           },
         ])
         .select()
@@ -193,30 +216,44 @@ export default function HighlightsPage() {
         await supabase.from('highlight_categories').insert(categoryLinks)
       }
 
-      // Try to add to Notion (optional - don't fail if this fails)
-      try {
-        const response = await fetch('/api/notion/add', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            text: text.trim(),
-            htmlContent: htmlContent || null,
-          }),
-        })
+      // Add categories to the new highlight data
+      const categoryData = selectedCategories.length > 0
+        ? categories.filter(c => selectedCategories.includes(c.id))
+        : []
 
-        if (!response.ok) {
-          const errorData = await response.json()
-          console.warn('Notion add failed:', errorData.error)
-          // Don't throw - database insert succeeded
-        }
+      // Add the new highlight to local state instead of reloading everything
+      const newHighlight: Highlight = {
+        ...data,
+        categories: categoryData,
+        linked_highlights: [],
+        months_reviewed: [],
+      }
+      
+      setHighlights(prevHighlights => [newHighlight, ...prevHighlights])
+      setTotalHighlights(prev => prev + 1)
+
+      // Queue Notion sync in background (non-blocking)
+      try {
+        await supabase
+          .from('notion_sync_queue')
+          .insert([{
+            user_id: user.id,
+            highlight_id: data.id,
+            operation_type: 'add',
+            text: text.trim(),
+            html_content: htmlContent || null,
+            status: 'pending',
+          }])
+        
+        // Trigger background processing (don't wait for it)
+        fetch('/api/notion/sync', { method: 'POST' }).catch(() => {
+          // Silently fail - queue processor will handle it
+        })
       } catch (notionError) {
-        console.warn('Notion add error:', notionError)
+        console.warn('Failed to queue Notion sync:', notionError)
         // Continue - database insert succeeded
       }
 
-      await loadHighlights()
       setText('')
       setHtmlContent('')
       setSource('')
@@ -239,41 +276,111 @@ export default function HighlightsPage() {
 
       if (error) throw error
 
-      setHighlights(highlights.filter((h) => h.id !== id))
+      // Update local state directly
+      setHighlights(prevHighlights => prevHighlights.filter((h) => h.id !== id))
+      setTotalHighlights(prev => Math.max(0, prev - 1))
     } catch (error) {
       console.error('Error deleting highlight:', error)
+      // Reload on error to ensure consistency
+      await loadHighlights()
     }
   }
 
-  const handleCreateLink = async (fromId: string, toId: string, linkText: string) => {
+  const handleStartLinking = () => {
+    setLinkingMode(true)
+    setShowLinkSearch(false)
+    setSelectedLinkText('')
+    setLinkSearchQuery('')
+    setLinkSearchResults([])
+  }
+
+  const handleTextSelectionInEditor = () => {
+    if (!linkingMode) return
+
+    const selection = window.getSelection()
+    if (selection && selection.toString().trim()) {
+      const selectedText = selection.toString().trim()
+      setSelectedLinkText(selectedText)
+      setShowLinkSearch(true)
+      // Trigger search for highlights
+      performLinkSearch('')
+    }
+  }
+
+  const performLinkSearch = async (query: string) => {
+    if (!query.trim()) {
+      // If empty query, show recent highlights (excluding the one being edited)
+      try {
+        const { data, error } = await supabase
+          .from('highlights')
+          .select('*')
+          .neq('id', editingId || '')
+          .order('created_at', { ascending: false })
+          .limit(10)
+
+        if (error) throw error
+        setLinkSearchResults(data || [])
+      } catch (error) {
+        console.error('Error loading highlights for linking:', error)
+        setLinkSearchResults([])
+      }
+      return
+    }
+
+    try {
+      const response = await fetch('/api/search', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          query: query.trim(),
+          type: 'fulltext',
+        }),
+      })
+
+      if (!response.ok) {
+        throw new Error('Search failed')
+      }
+
+      const data = await response.json()
+      // Filter out the highlight being edited
+      const filteredResults = (data.results || []).filter((h: Highlight) => h.id !== editingId)
+      setLinkSearchResults(filteredResults)
+    } catch (error) {
+      console.error('Error searching highlights for linking:', error)
+      setLinkSearchResults([])
+    }
+  }
+
+  const handleCreateLink = async (targetHighlightId: string) => {
+    if (!editingId || !selectedLinkText) return
+
     try {
       const { error } = await supabase
         .from('highlight_links')
         .insert([
           {
-            from_highlight_id: fromId,
-            to_highlight_id: toId,
-            link_text: linkText,
+            from_highlight_id: editingId,
+            to_highlight_id: targetHighlightId,
+            link_text: selectedLinkText,
           },
         ])
 
       if (error) throw error
+
+      // Reload highlights to get updated link data (links require complex joins)
       await loadHighlights()
+      
+      // Reset linking state
       setLinkingMode(false)
-      setSelectedText('')
-      setLinkTargetId(null)
+      setSelectedLinkText('')
+      setLinkSearchQuery('')
+      setLinkSearchResults([])
+      setShowLinkSearch(false)
     } catch (error) {
       console.error('Error creating link:', error)
-    }
-  }
-
-  const handleTextSelection = (highlightId: string) => {
-    if (!linkingMode) return
-
-    const selection = window.getSelection()
-    if (selection && selection.toString().trim()) {
-      setSelectedText(selection.toString())
-      setLinkTargetId(highlightId)
+      alert('Failed to create link. Please try again.')
     }
   }
 
@@ -284,6 +391,11 @@ export default function HighlightsPage() {
     setEditSource(highlight.source || '')
     setEditAuthor(highlight.author || '')
     setEditCategories(highlight.categories?.map((c) => c.id) || [])
+    setLinkingMode(false)
+    setSelectedLinkText('')
+    setLinkSearchQuery('')
+    setLinkSearchResults([])
+    setShowLinkSearch(false)
   }
 
   const handleCancelEdit = () => {
@@ -293,26 +405,77 @@ export default function HighlightsPage() {
     setEditSource('')
     setEditAuthor('')
     setEditCategories([])
+    setLinkingMode(false)
+    setSelectedLinkText('')
+    setLinkSearchQuery('')
+    setLinkSearchResults([])
+    setShowLinkSearch(false)
   }
 
   const handleSaveEdit = async () => {
-    if (!editingId || !editText.trim()) return
+    if (!editingId) return
 
     try {
       setUpdatingNotion(true)
 
-      // Update in database
-      const { error: updateError } = await supabase
-        .from('highlights')
-        .update({
-          text: editText.trim(),
-          html_content: editHtmlContent.trim() || null,
-          source: editSource.trim() || null,
-          author: editAuthor.trim() || null,
-        })
-        .eq('id', editingId)
+      // Prepare update data - handle empty strings properly
+      // Use explicit null checks to ensure empty strings are handled correctly
+      const updateData: any = {
+        text: editText.trim(),
+        html_content: editHtmlContent && editHtmlContent.trim() ? editHtmlContent.trim() : null,
+        source: editSource && editSource.trim() ? editSource.trim() : null,
+        author: editAuthor && editAuthor.trim() ? editAuthor.trim() : null,
+      }
 
-      if (updateError) throw updateError
+      console.log('Updating highlight:', editingId, 'with data:', updateData)
+
+      // Update in database - use select to get the updated row back
+      const { error: updateError, data: updatedData } = await supabase
+        .from('highlights')
+        .update(updateData)
+        .eq('id', editingId)
+        .select(`
+          *,
+          highlight_categories (
+            category:categories (*)
+          ),
+          highlight_links_from:highlight_links!from_highlight_id (
+            id,
+            to_highlight_id,
+            link_text,
+            to_highlight:highlights!to_highlight_id (
+              id,
+              text,
+              source,
+              author
+            )
+          ),
+          months_reviewed:highlight_months_reviewed (
+            id,
+            month_year,
+            created_at
+          )
+        `)
+        .single()
+
+      if (updateError) {
+        console.error('Update error details:', {
+          error: updateError,
+          code: updateError.code,
+          message: updateError.message,
+          details: updateError.details,
+          hint: updateError.hint,
+        })
+        throw updateError
+      }
+
+      // Verify the update actually happened
+      if (!updatedData) {
+        console.error('Update returned no data for highlight:', editingId)
+        throw new Error('Update returned no data - RLS policy may be blocking the update')
+      }
+
+      console.log('Update successful, returned data:', updatedData)
 
       // Update categories
       // First, remove existing categories
@@ -330,35 +493,64 @@ export default function HighlightsPage() {
         await supabase.from('highlight_categories').insert(categoryLinks)
       }
 
-      // Try to update in Notion
+      // Queue Notion sync in background (non-blocking)
       try {
-        const response = await fetch('/api/notion/update', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            highlightId: editingId,
-            text: editText.trim(),
-            htmlContent: editHtmlContent.trim(),
-          }),
-        })
-
-        if (!response.ok) {
-          const errorData = await response.json()
-          console.warn('Notion update failed:', errorData.error)
-          // Don't throw - database update succeeded, Notion update is optional
+        // Get current user
+        const { data: { user: currentUser } } = await supabase.auth.getUser()
+        if (currentUser) {
+          // Get the original highlight to store original text for Notion matching
+          const originalHighlight = highlights.find(h => h.id === editingId)
+          
+          await supabase
+            .from('notion_sync_queue')
+            .insert([{
+              user_id: currentUser.id,
+              highlight_id: editingId,
+              operation_type: 'update',
+              text: editText.trim(),
+              html_content: editHtmlContent.trim(),
+              original_text: originalHighlight?.text || '',
+              original_html_content: originalHighlight?.html_content || '',
+              status: 'pending',
+            }])
+          
+          // Trigger background processing (don't wait for it)
+          fetch('/api/notion/sync', { method: 'POST' }).catch(() => {
+            // Silently fail - queue processor will handle it
+          })
         }
       } catch (notionError) {
-        console.warn('Notion update error:', notionError)
+        console.warn('Failed to queue Notion sync:', notionError)
         // Continue - database update succeeded
       }
 
-      await loadHighlights()
+      // Process the updated data to match the format expected by the UI
+      const processedUpdatedData = {
+        ...updatedData,
+        categories: updatedData.highlight_categories?.map((hc: any) => hc.category) || 
+                    categories.filter(c => editCategories.includes(c.id)),
+        linked_highlights: updatedData.highlight_links_from || [],
+        months_reviewed: updatedData.months_reviewed || [],
+      }
+
+      // Update local state directly instead of reloading everything
+      // Use the data returned from Supabase to ensure consistency
+      setHighlights(prevHighlights => 
+        prevHighlights.map(h => {
+          if (h.id === editingId) {
+            return processedUpdatedData
+          }
+          return h
+        })
+      )
+
       handleCancelEdit()
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error updating highlight:', error)
-      alert('Failed to update highlight. Please try again.')
+      const errorMessage = error?.message || 'Failed to update highlight. Please try again.'
+      alert(errorMessage)
+      // Reload on error to ensure consistency
+      await loadHighlights()
     } finally {
       setUpdatingNotion(false)
     }
@@ -403,16 +595,12 @@ export default function HighlightsPage() {
               >
                 Import from Notion
               </Link>
-              <button
-                onClick={() => setLinkingMode(!linkingMode)}
-                className={`px-4 py-2 rounded-lg transition ${
-                  linkingMode
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600'
-                }`}
+              <Link
+                href="/settings"
+                className="px-4 py-2 bg-gray-200 dark:bg-gray-700 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-600 transition"
               >
-                {linkingMode ? 'Cancel Linking' : 'Link Highlights'}
-              </button>
+                Settings
+              </Link>
               <Link
                 href="/"
                 className="px-4 py-2 bg-gray-200 dark:bg-gray-700 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-600 transition"
@@ -422,13 +610,6 @@ export default function HighlightsPage() {
             </div>
           </div>
 
-          {linkingMode && (
-            <div className="mb-4 p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800">
-              <p className="text-sm text-blue-800 dark:text-blue-200">
-                Linking mode: Select text in a highlight, then click another highlight to create a link.
-              </p>
-            </div>
-          )}
 
           <form onSubmit={handleSubmit} className="mb-8 bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg">
             <h2 className="text-2xl font-semibold mb-4 text-gray-900 dark:text-white">
@@ -594,7 +775,6 @@ export default function HighlightsPage() {
                   className={`bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg ${
                     highlight.archived ? 'opacity-60 border-2 border-orange-300 dark:border-orange-700' : ''
                   }`}
-                  onMouseUp={() => handleTextSelection(highlight.id)}
                 >
                   {highlight.archived && (
                     <div className="mb-2 px-2 py-1 bg-orange-100 dark:bg-orange-900 text-orange-800 dark:text-orange-200 rounded text-xs font-semibold inline-block">
@@ -604,18 +784,97 @@ export default function HighlightsPage() {
                   {editingId === highlight.id ? (
                     <div className="mb-4 space-y-4">
                       <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                          Highlight Text *
-                        </label>
-                        <RichTextEditor
-                          value={editText}
-                          htmlValue={editHtmlContent}
-                          onChange={(plainText, html) => {
-                            setEditText(plainText)
-                            setEditHtmlContent(html)
-                          }}
-                          placeholder="Enter your highlight..."
-                        />
+                        <div className="flex items-center justify-between mb-2">
+                          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                            Highlight Text *
+                          </label>
+                          <button
+                            type="button"
+                            onClick={handleStartLinking}
+                            className={`px-3 py-1 text-xs rounded transition ${
+                              linkingMode
+                                ? 'bg-green-600 text-white'
+                                : 'bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-gray-600'
+                            }`}
+                          >
+                            {linkingMode ? 'Linking... (Select text)' : 'Link Text'}
+                          </button>
+                        </div>
+                        <div className="relative">
+                          <div
+                            onMouseUp={handleTextSelectionInEditor}
+                            className={linkingMode ? 'cursor-text' : ''}
+                          >
+                            <RichTextEditor
+                              value={editText}
+                              htmlValue={editHtmlContent}
+                              onChange={(plainText, html) => {
+                                setEditText(plainText)
+                                setEditHtmlContent(html)
+                              }}
+                              placeholder="Enter your highlight..."
+                            />
+                          </div>
+                          {showLinkSearch && selectedLinkText && (
+                            <div className="absolute z-50 mt-2 w-full bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg shadow-xl max-h-64 overflow-y-auto">
+                              <div className="p-3 border-b border-gray-200 dark:border-gray-700">
+                                <p className="text-sm text-gray-600 dark:text-gray-400 mb-2">
+                                  Link &quot;{selectedLinkText.substring(0, 30)}{selectedLinkText.length > 30 ? '...' : ''}&quot; to:
+                                </p>
+                                <input
+                                  type="text"
+                                  value={linkSearchQuery}
+                                  onChange={(e) => setLinkSearchQuery(e.target.value)}
+                                  placeholder="Search highlights..."
+                                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent dark:bg-gray-700 dark:text-white text-sm"
+                                  autoFocus
+                                />
+                              </div>
+                              <div className="max-h-48 overflow-y-auto">
+                                {linkSearchResults.length === 0 ? (
+                                  <div className="p-4 text-center text-sm text-gray-500 dark:text-gray-400">
+                                    {linkSearchQuery ? 'No highlights found' : 'Start typing to search...'}
+                                  </div>
+                                ) : (
+                                  linkSearchResults.map((targetHighlight) => (
+                                    <button
+                                      key={targetHighlight.id}
+                                      onClick={() => handleCreateLink(targetHighlight.id)}
+                                      className="w-full text-left p-3 hover:bg-gray-100 dark:hover:bg-gray-700 border-b border-gray-200 dark:border-gray-700 last:border-b-0 transition"
+                                    >
+                                      <div
+                                        className="text-sm prose dark:prose-invert max-w-none line-clamp-2"
+                                        dangerouslySetInnerHTML={{
+                                          __html: targetHighlight.html_content || targetHighlight.text,
+                                        }}
+                                      />
+                                      {(targetHighlight.source || targetHighlight.author) && (
+                                        <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                                          {targetHighlight.author && <span>{targetHighlight.author}</span>}
+                                          {targetHighlight.author && targetHighlight.source && <span> • </span>}
+                                          {targetHighlight.source && <span>{targetHighlight.source}</span>}
+                                        </p>
+                                      )}
+                                    </button>
+                                  ))
+                                )}
+                              </div>
+                              <div className="p-2 border-t border-gray-200 dark:border-gray-700">
+                                <button
+                                  onClick={() => {
+                                    setLinkingMode(false)
+                                    setShowLinkSearch(false)
+                                    setSelectedLinkText('')
+                                    setLinkSearchQuery('')
+                                  }}
+                                  className="w-full px-3 py-1 text-sm bg-gray-200 dark:bg-gray-700 rounded hover:bg-gray-300 dark:hover:bg-gray-600 transition"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
                       </div>
                       <div className="grid md:grid-cols-2 gap-4">
                         <div>
@@ -673,7 +932,7 @@ export default function HighlightsPage() {
                       <div className="flex gap-2">
                         <button
                           onClick={handleSaveEdit}
-                          disabled={updatingNotion || !editText.trim()}
+                          disabled={updatingNotion}
                           className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition disabled:bg-gray-400 disabled:cursor-not-allowed"
                         >
                           {updatingNotion ? 'Saving...' : 'Save'}
@@ -760,14 +1019,6 @@ export default function HighlightsPage() {
                     <div className="flex gap-2">
                       {editingId !== highlight.id && (
                         <>
-                          {linkingMode && selectedText && linkTargetId !== highlight.id && (
-                            <button
-                              onClick={() => handleCreateLink(linkTargetId!, highlight.id, selectedText)}
-                              className="px-3 py-1 text-sm bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300 rounded hover:bg-green-200 dark:hover:bg-green-800 transition"
-                            >
-                              Link to &quot;{selectedText.substring(0, 20)}...&quot;
-                            </button>
-                          )}
                           <button
                             onClick={() => handleStartEdit(highlight)}
                             className="px-3 py-1 text-sm bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300 rounded hover:bg-blue-200 dark:hover:bg-blue-800 transition"
@@ -782,9 +1033,17 @@ export default function HighlightsPage() {
                                     .from('highlights')
                                     .update({ archived: false })
                                     .eq('id', highlight.id)
-                                  await loadHighlights()
+                                  
+                                  // Update local state directly
+                                  setHighlights(prevHighlights =>
+                                    prevHighlights.map(h =>
+                                      h.id === highlight.id ? { ...h, archived: false } : h
+                                    )
+                                  )
                                 } catch (error) {
                                   console.error('Error unarchiving highlight:', error)
+                                  // Reload on error
+                                  await loadHighlights()
                                 }
                               }}
                               className="px-3 py-1 text-sm bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300 rounded hover:bg-blue-200 dark:hover:bg-blue-800 transition"

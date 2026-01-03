@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { Client } from '@notionhq/client'
+import { createClient } from '@/lib/supabase/server'
 
 // Convert HTML to Notion rich text format (simplified version)
 function htmlToNotionRichText(html: string): any[] {
@@ -316,6 +317,17 @@ function htmlToNotionBlocks(html: string): any[] {
 
 export async function POST(request: NextRequest) {
   try {
+    const supabase = await createClient()
+    
+    // Check authentication
+    const { data: { user }, error: authError } = await supabase.auth.getUser()
+    if (authError || !user) {
+      return NextResponse.json(
+        { error: 'Unauthorized' },
+        { status: 401 }
+      )
+    }
+
     const { text, htmlContent } = await request.json()
 
     if (!text) {
@@ -325,16 +337,31 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Get Notion credentials from environment
-    const notionApiKey = process.env.NOTION_API_KEY
-    const notionPageId = process.env.NOTION_PAGE_ID
+    // Get user's Notion settings
+    const { data: notionSettings, error: settingsError } = await supabase
+      .from('user_notion_settings')
+      .select('notion_api_key, notion_page_id, enabled')
+      .eq('user_id', user.id)
+      .eq('enabled', true)
+      .maybeSingle()
 
-    if (!notionApiKey || !notionPageId) {
+    if (settingsError) {
+      console.error('Error fetching Notion settings:', settingsError)
       return NextResponse.json(
-        { error: 'Notion API key and Page ID must be set in environment variables' },
+        { error: 'Failed to fetch Notion settings' },
+        { status: 500 }
+      )
+    }
+
+    if (!notionSettings) {
+      return NextResponse.json(
+        { error: 'Notion integration not configured. Please set up your Notion credentials in settings.' },
         { status: 400 }
       )
     }
+
+    const notionApiKey = notionSettings.notion_api_key
+    const notionPageId = notionSettings.notion_page_id
 
     // Initialize Notion client
     const notion = new Client({

@@ -1,12 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { Client } from '@notionhq/client'
-import { createClient } from '@supabase/supabase-js'
-
-// Create Supabase client for server-side use
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || ''
-const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || 
-                    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ''
-const supabase = createClient(supabaseUrl, supabaseKey)
+import { createClient } from '@/lib/supabase/server'
 
 // Convert Notion rich text to HTML (same as in import route)
 function notionRichTextToHTML(richText: any[]): string {
@@ -196,6 +190,8 @@ function blocksToText(blocks: any[]): string {
 
 export async function GET(request: NextRequest) {
   try {
+    const supabase = await createClient()
+    
     // Get Notion credentials from environment variables
     const notionApiKey = process.env.NOTION_API_KEY
     const notionPageId = process.env.NOTION_PAGE_ID
@@ -209,6 +205,10 @@ export async function GET(request: NextRequest) {
         { status: 401 }
       )
     }
+    
+    // Note: This cron job may need to be restructured to work with user-specific data
+    // For now, it will only work if called with a valid user session
+    // Consider using a service role key for cron jobs that need to access all users' data
 
     if (!notionApiKey || !notionPageId) {
       return NextResponse.json(

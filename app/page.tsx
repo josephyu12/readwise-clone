@@ -6,7 +6,7 @@ export default function Home() {
       <div className="container mx-auto px-4 py-16">
         <div className="max-w-4xl mx-auto">
           <h1 className="text-5xl font-bold text-gray-900 dark:text-white mb-4">
-            Readwise Clone
+            Freedwise
           </h1>
           <p className="text-xl text-gray-600 dark:text-gray-300 mb-8">
             Resurface your highlights in daily summaries
@@ -59,6 +59,15 @@ export default function Home() {
               <p className="text-gray-600 dark:text-gray-300">
                 View your resurfaced highlights
               </p>
+            </Link>
+          </div>
+          
+          <div className="mt-8 text-center">
+            <Link
+              href="/settings"
+              className="inline-block px-6 py-3 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-600 transition"
+            >
+              Settings
             </Link>
           </div>
         </div>

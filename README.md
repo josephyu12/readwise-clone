@@ -1,4 +1,4 @@
-# Readwise Clone
+# Freedwise
 
 A web application that resurfaces your highlights in daily summaries, built with Next.js, Tailwind CSS, and Supabase.
 
