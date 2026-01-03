@@ -71,12 +71,29 @@ export default function ImportPage() {
     setProgress({ current: 0, total: preview.length })
 
     try {
-      // Get all existing highlights to check for duplicates
-      const { data: existingHighlights, error: fetchError } = await supabase
-        .from('highlights')
-        .select('text, html_content')
-
-      if (fetchError) throw fetchError
+      // Get ALL existing highlights to check for duplicates
+      // Paginate through all highlights to avoid Supabase's default limit
+      const existingHighlights: any[] = []
+      let fetchCursor = 0
+      const pageSize = 1000
+      
+      while (true) {
+        const { data: batch, error: fetchError } = await supabase
+          .from('highlights')
+          .select('text, html_content')
+          .range(fetchCursor, fetchCursor + pageSize - 1)
+        
+        if (fetchError) throw fetchError
+        
+        if (!batch || batch.length === 0) break
+        
+        existingHighlights.push(...batch)
+        
+        // If we got fewer than pageSize, we've reached the end
+        if (batch.length < pageSize) break
+        
+        fetchCursor += pageSize
+      }
 
       // Create a set of existing highlight texts (normalized for comparison)
       const existingTexts = new Set(

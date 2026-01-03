@@ -287,12 +287,29 @@ export async function GET(request: NextRequest) {
       })
     }
 
-    // Get existing highlights to check for duplicates and updates
-    const { data: existingHighlights, error: fetchError } = await supabase
-      .from('highlights')
-      .select('id, text, html_content')
-
-    if (fetchError) throw fetchError
+    // Get ALL existing highlights to check for duplicates and updates
+    // Paginate through all highlights to avoid Supabase's default limit
+    const existingHighlights: any[] = []
+    let fetchCursor = 0
+    const pageSize = 1000
+    
+    while (true) {
+      const { data: batch, error: fetchError } = await supabase
+        .from('highlights')
+        .select('id, text, html_content')
+        .range(fetchCursor, fetchCursor + pageSize - 1)
+      
+      if (fetchError) throw fetchError
+      
+      if (!batch || batch.length === 0) break
+      
+      existingHighlights.push(...batch)
+      
+      // If we got fewer than pageSize, we've reached the end
+      if (batch.length < pageSize) break
+      
+      fetchCursor += pageSize
+    }
 
     // Helper function to normalize text for comparison
     const normalize = (text: string) => text.trim().toLowerCase().replace(/\s+/g, ' ')
